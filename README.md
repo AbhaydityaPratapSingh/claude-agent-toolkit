@@ -33,42 +33,42 @@ renderer over IPC.
 flowchart TB
     CLI["agent-manager<br/>terminal CLI"]
 
-    subgraph AS["agent-studio (Electron)"]
-        direction TB
-        REN["renderer<br/>React UI — no Node access<br/>contextIsolation: true"]
-        PRE["preload<br/>contextBridge API<br/>no fs, no child_process"]
+    subgraph STUDIO["agent-studio (Electron)"]
+        REN["renderer: React UI<br/>no Node access"]
+        PRE["preload: contextBridge API"]
         MAIN["main process<br/>Node, full privileges"]
-        REN <-- "studio.* calls" --> PRE
-        PRE <-- "ipcRenderer.invoke" --> MAIN
+        REN --> PRE
+        PRE --> REN
+        PRE --> MAIN
+        MAIN --> PRE
     end
 
-    CORE[("agent-core<br/>KNOWN_TOOLS, MODELS,<br/>PERMISSION_MODES,<br/>validateName, lintAgent")]
+    CORE[("agent-core<br/>tools, models, permission modes<br/>validateName, lintAgent")]
 
     subgraph DISK["Agent files on disk"]
-        direction TB
-        GLOBAL["~/.claude/agents/*.md<br/>global scope"]
-        PROJECT["&lt;project&gt;/.claude/agents/*.md<br/>project scope"]
+        GLOBAL["global scope<br/>home/.claude/agents/*.md"]
+        PROJECT["project scope<br/>project/.claude/agents/*.md"]
     end
 
-    CLAUDE[["claude CLI subprocess<br/>--agent, --permission-mode, -p"]]
-    STREAM["stream.js<br/>parses assistant / user / result events"]
-    HIST[("run-history.json<br/>last 60 runs, 80k chars each")]
-    GIT[("git<br/>agents folder only, opt-in, never pushed")]
+    CLAUDE[["claude CLI subprocess"]]
+    STREAM["stream.js<br/>parses stream-json events"]
+    HIST[("run-history.json<br/>last 60 runs")]
+    GIT[("git<br/>agents folder only, opt-in")]
 
-    CLI -- "validateName, lintAgent" --> CORE
-    CLI -- "scanAgents, writeAgent, deleteAgent" --> DISK
-    CLI -- "spawn, task piped via stdin" --> CLAUDE
-    CLAUDE -- "plain text stdout/stderr" --> CLI
+    CLI --> CORE
+    CLI --> DISK
+    CLI -->|spawn, task via stdin| CLAUDE
+    CLAUDE -->|plain text stdout| CLI
 
-    MAIN -- "validateName, lintAgent" --> CORE
-    MAIN -- "scanAgents, writeAgent, deleteAgent" --> DISK
-    MAIN -- "commitChange on save/delete" --> GIT
-    MAIN -- "spawn, task piped via stdin<br/>--output-format stream-json --verbose" --> CLAUDE
-    CLAUDE -- "stream-json event lines" --> STREAM
-    STREAM -- "text + tool-use notices" --> MAIN
-    STREAM -- "cost, tokens, duration, turns" --> MAIN
-    MAIN -- "recordRun, appendOutput, recordSummary" --> HIST
-    MAIN -- "delegate:data / delegate:summary / delegate:end" --> PRE
+    MAIN --> CORE
+    MAIN --> DISK
+    MAIN -->|commit on save or delete| GIT
+    MAIN -->|spawn, task via stdin, stream json mode| CLAUDE
+    CLAUDE -->|stream json events| STREAM
+    STREAM -->|text and notices| MAIN
+    STREAM -->|cost, tokens, duration| MAIN
+    MAIN -->|save run| HIST
+    MAIN -->|delegate events| PRE
 ```
 
 ### Delegating a task
@@ -117,3 +117,182 @@ flowchart TB
    that. Nothing is ever pushed — there's no remote unless one is added by
    hand, and commit failures are swallowed deliberately so versioning can
    never be the reason a save fails.
+
+## Low-Level Design
+
+The diagrams above show *what* talks to *what*. This section shows the exact
+call sequence, wire formats, and on-disk/IPC data shapes behind
+`agent-studio`, taken directly from `src/main/index.js`, `stream.js`,
+`agents.js`, `history.js`, and `versioning.js`.
+
+### Sequence: delegating a task
+
+```mermaid
+sequenceDiagram
+    participant R as Renderer DelegatePanel
+    participant P as Preload
+    participant M as Main process
+    participant C as claude CLI child process
+    participant S as stream.js parser
+    participant H as run history store
+
+    R->>P: studio.startDelegation(agentName, task, cwd, mode)
+    P->>M: invoke delegate colon start
+    M->>H: recordRun runId, agentName, task, cwd, mode
+    M->>C: spawn claude with agent, permission mode, dash p, output format stream json, verbose
+    M->>C: stdin write task, stdin end
+    M-->>P: return runId
+
+    loop while process is running
+        C-->>M: stdout chunk, newline delimited json
+        M->>S: parser push chunk
+        S->>S: handle event by event type
+        alt event type is assistant text block
+            S-->>M: onText with text
+        else event type is assistant tool use block
+            S-->>M: onNotice with tool name
+        else event type is result
+            S-->>M: onResult with cost, tokens, duration, turns
+        end
+        M->>H: appendOutput runId, chunk
+        M-->>P: send delegate colon data
+        P-->>R: onDelegateData callback
+    end
+
+    S->>S: onResult fires once, from the terminal result event
+    M->>H: recordSummary runId, summary
+    M-->>P: send delegate colon summary
+    P-->>R: onDelegateSummary callback
+
+    C-->>M: close, exit code
+    M->>H: finishRun runId, exit code
+    M-->>P: send delegate colon end
+    P-->>R: onDelegateEnd callback
+```
+
+Notes that don't fit in the diagram:
+
+- `onResult` is intentionally the odd one out — every other callback fires
+  per stream chunk, but the CLI reports cost and token usage exactly once,
+  in the terminal `result` event, so `delegate:summary` fires once per run
+  regardless of how many `delegate:data` chunks preceded it.
+- `thinking` content blocks are matched in `stream.js`'s `switch` but never
+  call `onText` or `onNotice` — they're read and discarded on purpose.
+- A `tool_result` block with `is_error: true` (an `event.type === "user"`
+  event) produces a `⚠ tool call failed` notice, but does not stop the run —
+  only the process closing does.
+
+### Sequence: saving an agent
+
+```mermaid
+sequenceDiagram
+    participant R as Renderer AgentEditor
+    participant P as Preload
+    participant M as Main process
+    participant CORE as agent-core
+    participant FS as agents dot md files
+    participant G as versioning dot js
+
+    R->>P: studio.saveAgent(agent)
+    P->>M: invoke agents colon save
+    M->>CORE: validateName(agent.name)
+    CORE-->>M: null, or an error string
+    M->>M: agentExists(scope, name, projectRoot)
+    M->>FS: writeAgent(agent, projectRoot)
+    FS-->>M: filePath
+    M->>G: commitChange(dirname of filePath, message)
+    G->>G: git add all, git status, git commit
+    G-->>M: true, or false when nothing changed
+    M-->>P: resolve with filePath
+    P-->>R: resolved promise
+```
+
+`commitChange` returns `false` without erroring when the folder isn't a git
+repo *or* when `git status --porcelain` comes back empty — versioning is
+best-effort by design, so a failed or skipped commit never surfaces as a
+save failure.
+
+### Data shapes
+
+In-memory agent object — the shape both `agent-manager` and `agent-studio`
+read from disk and write back (`agents.js` in each package):
+
+```js
+{
+  name: string,          // kebab-case; doubles as the subagent_type
+  description: string,   // required — this is the router's matching signal
+  tools: string[] | null,// null means "all tools" (omitted from frontmatter)
+  tags: string[],        // a toolkit-only key; Claude Code ignores it
+  model: "inherit" | "opus" | "sonnet" | "haiku" | "fable",
+  body: string,           // persona / system prompt, trimmed
+  filePath: string,
+  scope: "user" | "project",
+  broken?: string,        // set instead of the above if the .md failed to parse
+}
+```
+
+What actually lands on disk (YAML frontmatter via `gray-matter`) — keys are
+*omitted*, not written as empty, when they'd otherwise take their default:
+
+```yaml
+---
+name: api-guardian
+description: Use when reviewing API changes for backward compatibility.
+tools: Read, Grep, Bash        # omitted entirely for "all tools"
+tags: review, api               # omitted when there are no tags
+model: sonnet                   # omitted for "inherit"
+---
+
+<persona body, trimmed>
+```
+
+One run in `run-history.json` (array, capped at 60 entries, newest first):
+
+```js
+{
+  runId: string,          // `run-${Date.now()}-${sequence}`
+  agentName: string,
+  task: string,
+  cwd: string,
+  mode: "default" | "plan" | "acceptEdits" | "bypassPermissions",
+  startedAt: number,      // epoch ms
+  finishedAt: number | null,
+  exitCode: number | null,
+  output: string,          // capped at 80,000 characters
+  truncated: boolean,
+  summary: {
+    costUsd: number | null,     // null if the run never reached a result event
+    durationMs: number | null,
+    numTurns: number | null,
+    isError: boolean,
+    sessionId: string | null,
+    usage: { input: number, output: number, cacheRead: number, cacheWrite: number },
+    models: string[],
+  } | null,
+}
+```
+
+### IPC channel contract
+
+Every channel the preload script exposes, and the shape crossing it. All
+`invoke`-style channels are request/response; the last four are one-way
+`main → renderer` events pushed during a run.
+
+| Channel | Kind | In | Out |
+| --- | --- | --- | --- |
+| `meta:get` | invoke | — | `{ tools, models, permissionModes, globalDir, projectRoot, projectDir, recentProjects, claude }` |
+| `claude:recheck` | invoke | — | `{ checked, available, version }` |
+| `agents:list` | invoke | — | `Agent[]` |
+| `agents:save` | invoke | `Agent` | `filePath` |
+| `agents:delete` | invoke | `filePath` | `true` |
+| `agents:reveal` | invoke | `filePath` | — |
+| `project:pick` / `project:use` / `project:clear` | invoke | `root?` | `projectRoot \| null` |
+| `dir:pick` | invoke | `defaultPath?` | `path \| null` |
+| `history:list` / `history:get` / `history:clear` / `history:totals` | invoke | `agentName? \| runId` | run meta`[]` / run / `true` / totals |
+| `vcs:status` / `vcs:init` / `vcs:log` / `vcs:diff` / `vcs:revert` | invoke | `scope \| filePath \| hash` | status / commit log / diff text / `true` |
+| `delegate:start` | invoke | `{ agentName, task, cwd, mode }` | `runId` |
+| `delegate:stop` | invoke | `runId` | `boolean` |
+| `delegate:data` | event | — | `{ runId, chunk, stderr, notice }` |
+| `delegate:summary` | event | — | `{ runId, costUsd, durationMs, numTurns, isError, sessionId, usage, models }` |
+| `delegate:end` | event | — | `{ runId, code }` |
+| `claude:status` | event | — | `{ checked, available, version }` |
