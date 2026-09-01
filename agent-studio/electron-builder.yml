@@ -1,0 +1,30 @@
+appId: com.abhayditya.agentstudio
+productName: Agent Studio
+copyright: © Abhayditya Singh
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+win:
+  icon: resources/icon.ico
+  # Without a real certificate electron-builder produces an unsigned binary and
+  # SmartScreen warns on first run. Set CSC_LINK + CSC_KEY_PASSWORD to sign.
+  signAndEditExecutable: true
+  verifyUpdateCodeSignature: false
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Agent Studio
+  artifactName: ${productName} Setup ${version}.${ext}
+portable:
+  artifactName: ${productName} ${version} portable.${ext}

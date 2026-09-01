@@ -1,0 +1,10 @@
+{
+  "name": "agent-core",
+  "version": "1.0.0",
+  "description": "Shared vocabulary for the Claude Code subagent tools — tools, models, name rules, lint",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}

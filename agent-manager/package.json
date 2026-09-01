@@ -1,0 +1,21 @@
+{
+  "name": "agent-manager",
+  "version": "1.0.0",
+  "description": "Interactive dashboard for managing Claude Code subagents",
+  "type": "module",
+  "bin": {
+    "agent-manager": "./bin/agent-manager.js",
+    "agents-ui": "./bin/agent-manager.js"
+  },
+  "scripts": {
+    "start": "node ./bin/agent-manager.js"
+  },
+  "dependencies": {
+    "agent-core": "file:../agent-core",
+    "@inquirer/prompts": "^8.5.2",
+    "boxen": "^8.0.1",
+    "chalk": "^5.6.2",
+    "gray-matter": "^4.0.3",
+    "ora": "^9.4.1"
+  }
+}

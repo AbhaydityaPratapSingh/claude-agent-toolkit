@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+Thumbs.db
+
+# agent-studio runtime data (per-user, not source)
+studio-settings.json
+run-history.json
