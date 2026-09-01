@@ -22,6 +22,16 @@ win:
       arch: [x64]
     - target: portable
       arch: [x64]
+mac:
+  category: public.app-category.developer-tools
+  # No Apple Developer ID on the CI runner that builds this — ad-hoc/unsigned.
+  # Gatekeeper will warn on first open (right-click > Open, or `xattr -cr`).
+  identity: null
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
 nsis:
   oneClick: false
   perMachine: false
