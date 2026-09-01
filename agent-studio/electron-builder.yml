@@ -4,6 +4,10 @@ copyright: © Abhayditya Singh
 directories:
   output: dist
   buildResources: resources
+publish:
+  provider: github
+  owner: AbhaydityaPratapSingh
+  repo: claude-agent-toolkit
 files:
   - out/**/*
   - package.json
